@@ -47,6 +47,7 @@ int main(int argc,char** argv)
 
 	int remote_num = 0;
 	ss_addr_t remote_addr[MAX_REMOTE_NUM]; //远端地址
+	char *remote_port = NULL;
 
 	int option_index = 0;
 	//长选项

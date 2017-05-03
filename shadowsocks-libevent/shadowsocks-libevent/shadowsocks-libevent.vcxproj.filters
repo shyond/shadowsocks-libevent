@@ -65,5 +65,8 @@
     <ClCompile Include="..\..\src\win32.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\utils.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

@@ -39,7 +39,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>D:\shadowsocks-libevent\libevent;D:\shadowsocks-libevent\libevent\include;D:\shadowsocks-libevent\libevent\include\event2;$(IncludePath)</IncludePath>
+    <IncludePath>D:\openssl-1.0.1e\inc32;D:\shadowsocks-libevent\libevent;D:\shadowsocks-libevent\libevent\include;D:\shadowsocks-libevent\libevent\include\event2;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
@@ -90,6 +90,7 @@
     <ClCompile Include="..\..\src\encrypt.c" />
     <ClCompile Include="..\..\src\getopt.c" />
     <ClCompile Include="..\..\src\local.c" />
+    <ClCompile Include="..\..\src\utils.c" />
     <ClCompile Include="..\..\src\win32.c" />
     <ClCompile Include="shadowsocks-libevent.cpp" />
     <ClCompile Include="stdafx.cpp">
