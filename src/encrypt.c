@@ -195,7 +195,7 @@ static const cipher_kt_t *get_cipher_type(int method)
 #endif
 }
 
-static const digest_type_t *get_gidest_type(const char *digest)
+static const digest_type_t *get_digest_type(const char *digest)
 {
 	if (digest == NULL) {
 		LOGE("get_digest_type(): Digest name is null");
@@ -402,4 +402,232 @@ int ss_encrypt(buffer_t *plain, enc_ctx_t *ctx, size_t capacity)
 		}
 		return 0;
 	}
+}
+
+int ss_decrypt(buffer_t *cipher, enc_ctx_t *ctx, size_t capacity)
+{
+	if (ctx != NULL) {
+		static buffer_t tmp = { 0, 0, 0, NULL };
+
+		size_t iv_len = 0;
+		int err       = 1;
+
+		brealloc(&tmp, cipher->len, capacity);
+		buffer_t *plain = &tmp;
+		plain->len = cipher->len;
+
+		if (!ctx->init) {
+			uint8_t iv[MAX_IV_LENGTH];
+			iv_len      = enc_iv_len;
+			plain->len -= iv_len;
+
+			memcpy(iv, cipher->array, iv_len);
+			cipher_context_set_iv(&ctx->evp, iv, iv_len, 0);
+			ctx->counter = 0;
+			ctx->init    = 1;
+
+		}
+
+		if (enc_method >= SALSA20) {
+			//ÔÝ²»Ö§³Ö
+			FATAL("not support!");
+		} else {
+			err = cipher_context_update(&ctx->evp, (uint8_t *)plain->array, &plain->len,
+				(const uint8_t *)(cipher->array + iv_len),
+				cipher->len - iv_len);
+		}
+
+		if (!err) {
+			bfree(cipher);
+			return -1;
+		}
+
+		brealloc(cipher, plain->len, capacity);
+		memcpy(cipher->array, plain->array, plain->len);
+		cipher->len = plain->len;
+
+		return 0;
+	} else {
+		char *begin = cipher->array;
+		char *ptr   = cipher->array;
+		while (ptr < begin + cipher->len) {
+			*ptr = (char)dec_table[(uint8_t)*ptr];
+			ptr++;
+		}
+		return 0;
+	}
+}
+
+void enc_ctx_init(int method, enc_ctx_t *ctx, int enc)
+{
+	memset(ctx, 0,sizeof(enc_ctx_t));
+	cipher_context_init(&ctx->evp, method, enc);
+
+	if (enc) {
+		rand_bytes(ctx->evp.iv, enc_iv_len);
+	}
+}
+
+void enc_key_init(int method, const char *pass)
+{
+	if (method <= TABLE || method >= CIPHER_NUM) {
+		LOGE("enc_key_init(): Illegal method");
+		return;
+	}
+
+	// Initialize cache
+	//cache_create(&iv_cache, 1024, NULL);
+
+#if defined(USE_CRYPTO_OPENSSL)
+	OpenSSL_add_all_algorithms();
+#endif
+
+	cipher_t cipher;
+	memset(&cipher, 0, sizeof(cipher_t));
+
+	// Initialize sodium for random generator
+	//if (sodium_init() == -1) {
+	//	FATAL("Failed to initialize sodium");
+	//}
+
+	cipher.info = (cipher_kt_t *)get_cipher_type(method);
+
+	if (cipher.info == NULL && cipher.key_len == 0) {
+
+		LOGE("Cipher %s not found in crypto library", supported_ciphers[method]);
+		FATAL("Cannot initialize cipher");
+		
+	}
+
+	const digest_type_t *md = get_digest_type("MD5");
+	if (md == NULL) {
+		FATAL("MD5 Digest not found in crypto library");
+	}
+
+	enc_key_len = bytes_to_key(&cipher, md, (const uint8_t *)pass, enc_key);
+
+	if (enc_key_len == 0) {
+		FATAL("Cannot generate key and IV");
+	}
+	if (method == RC4_MD5) {
+		enc_iv_len = 16;
+	} else {
+		enc_iv_len = cipher_iv_size(&cipher);
+	}
+	enc_method = method;
+}
+
+void enc_table_init(const char *pass)
+{
+	uint32_t i;
+	uint64_t key = 0;
+	uint8_t *digest;
+
+	enc_table = (uint8_t *)ss_malloc(256);
+	dec_table = (uint8_t *)ss_malloc(256);
+
+	for (i = 0; i < 256; ++i)
+		enc_table[i] = 255 - i;
+
+	for (i = 0; i < 256; ++i)
+		// gen decrypt table from encrypt table
+		dec_table[enc_table[i]] = i;
+}
+int enc_init(const char *pass, const char *method)
+{
+	int m = TABLE;
+	if (method != NULL) {
+		for (m = TABLE; m < CIPHER_NUM; m++)
+			if (strcmp(method, supported_ciphers[m]) == 0) {
+				break;
+			}
+			if (m >= CIPHER_NUM) {
+				LOGE("Invalid cipher name: %s, use rc4-md5 instead", method);
+				m = RC4_MD5;
+			}
+	}
+	if (m == TABLE) {
+		enc_table_init(pass);
+	} else {
+		enc_key_init(m, pass);
+	}
+	return m;
+}
+
+int ss_check_hash(buffer_t *buf, chunk_t *chunk, enc_ctx_t *ctx, size_t capacity)
+{
+	int i, j, k;
+	size_t blen  = buf->len;
+	uint32_t cidx = chunk->idx;
+
+	brealloc(chunk->buf, chunk->len + blen, capacity);
+	brealloc(buf, chunk->len + blen, capacity);
+
+	for (i = 0, j = 0, k = 0; i < blen; i++) {
+		chunk->buf->array[cidx++] = buf->array[k++];
+
+		if (cidx == CLEN_BYTES) {
+			uint16_t clen = ntohs(*((uint16_t *)chunk->buf->array));
+			brealloc(chunk->buf, clen + AUTH_BYTES, capacity);
+			chunk->len = clen;
+		}
+
+		if (cidx == chunk->len + AUTH_BYTES) {
+			// Compare hash
+			uint8_t hash[ONETIMEAUTH_BYTES * 2];
+			uint8_t key[MAX_IV_LENGTH + sizeof(uint32_t)];
+
+			uint32_t c = htonl(chunk->counter);
+			memcpy(key, ctx->evp.iv, enc_iv_len);
+			memcpy(key + enc_iv_len, &c, sizeof(uint32_t));
+#if defined(USE_CRYPTO_OPENSSL)
+			HMAC(EVP_sha1(), key, enc_iv_len + sizeof(uint32_t),
+				(uint8_t *)chunk->buf->array + AUTH_BYTES, chunk->len, hash, NULL);
+#endif
+
+			if (safe_memcmp(hash, chunk->buf->array + CLEN_BYTES, ONETIMEAUTH_BYTES) != 0) {
+				return 0;
+			}
+
+			// Copy chunk back to buffer
+			memmove(buf->array + j + chunk->len, buf->array + k, blen - i - 1);
+			memcpy(buf->array + j, chunk->buf->array + AUTH_BYTES, chunk->len);
+
+			// Reset the base offset
+			j   += chunk->len;
+			k    = j;
+			cidx = 0;
+			chunk->counter++;
+		}
+	}
+
+	buf->len   = j;
+	chunk->idx = cidx;
+	return 1;
+}
+
+int
+	ss_gen_hash(buffer_t *buf, uint32_t *counter, enc_ctx_t *ctx, size_t capacity)
+{
+	size_t blen  = buf->len;
+	uint16_t chunk_len = htons((uint16_t)blen);
+	uint8_t hash[ONETIMEAUTH_BYTES * 2];
+	uint8_t key[MAX_IV_LENGTH + sizeof(uint32_t)];
+	uint32_t c = htonl(*counter);
+
+	brealloc(buf, AUTH_BYTES + blen, capacity);
+	memcpy(key, ctx->evp.iv, enc_iv_len);
+	memcpy(key + enc_iv_len, &c, sizeof(uint32_t));
+#if defined(USE_CRYPTO_OPENSSL)
+	HMAC(EVP_sha1(), key, enc_iv_len + sizeof(uint32_t), (uint8_t *)buf->array, blen, hash, NULL);
+#endif
+
+	memmove(buf->array + AUTH_BYTES, buf->array, blen);
+	memcpy(buf->array + CLEN_BYTES, hash, ONETIMEAUTH_BYTES);
+	memcpy(buf->array, &chunk_len, CLEN_BYTES);
+
+	*counter = *counter + 1;
+	buf->len = blen + AUTH_BYTES;
+
+	return 0;
 }
