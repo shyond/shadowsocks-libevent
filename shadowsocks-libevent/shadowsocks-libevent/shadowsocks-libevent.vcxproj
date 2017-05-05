@@ -39,7 +39,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>..\..\openssl-1.0.1e\inc32;..\..\shadowsocks-libevent\libevent;..\..\shadowsocks-libevent\libevent\include;..\..\shadowsocks-libevent\libevent\include\event2;$(IncludePath)</IncludePath>
+    <IncludePath>..\..\openssl-1.0.1e\inc32;..\..\libevent;..\..\libevent\include;..\..\libevent\include\event2;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
@@ -76,6 +76,7 @@
     <None Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\src\common.h" />
     <ClInclude Include="..\..\src\encrypt.h" />
     <ClInclude Include="..\..\src\getopt.h" />
     <ClInclude Include="..\..\src\jconf.h" />

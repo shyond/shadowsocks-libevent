@@ -1,4 +1,5 @@
 #include "win32.h"
+#include "utils.h"
 
 void winsock_init(void)
 {
