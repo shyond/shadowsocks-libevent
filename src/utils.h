@@ -50,26 +50,6 @@ extern FILE *logfile;
 void FATAL(const char *msg);
 
 void usage();
-
-void *ss_malloc(size_t size)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-void usage();
 void *ss_malloc(size_t size);
 void *ss_realloc(void *ptr, size_t new_size);
 
@@ -78,5 +58,7 @@ void *ss_realloc(void *ptr, size_t new_size);
            free(ptr);    \
 	       ptr = NULL;   \
 	 }while(0)     
+
+
 
 #endif
