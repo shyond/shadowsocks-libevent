@@ -3,8 +3,10 @@
 #include "utils.h"
 #include "encrypt.h"
 #include "common.h"
-#include <event2/event.h>
+#include <assert.h>
+#include "sock5.h"
 
+#include <event2/event.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include <event2/listener.h>
@@ -33,7 +35,7 @@
 #endif
 
 #ifndef BUF_SIZE
-#define BUF_SIZE 2048
+#define BUF_SIZE 16384
 #endif
 
 //int verbose        = 0;
@@ -58,6 +60,15 @@ static int get_sockaddr(struct sockaddr *skaddr,const char *host, const char *po
 
 }
 
+static void close_and_free_server(server *server)
+{
+
+}
+static void close_and_free_remote(remote *remote)
+{
+
+}
+
 static void server_recv_cb(struct bufferevent *bev, void *user_data)
 {
 	server_t *server = (server_t *)(user_data);
@@ -71,8 +82,143 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 	} else {
 		buf = remote->buf;
 	}
+	
+	
+	size_t read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
+	
+	size_t left =  buf->capacity -buf->len;//获取剩余容量
+	//重新分配内存，libevent max_io_read_buffer =16k,buf capacity = 16k,
+	//每次加密完buf->len = 0;所以很少出现left < read_len
+	if(left < read_len){
 
-	r = bufferevent_read(bev,buf->array + buf->len,BUF_SIZE - buf->len);
+		brealloc(buf,0,read_len + buf->len);
+	}
+
+	r = bufferevent_read(bev,buf->array + buf->len,read_len);//一次性读完,bufferevent_read有内容不会自动回调
+	assert(r == read_len);
+	buf->len += r;
+
+	while(1){
+		
+		//sock5 .客户端发送
+		if(server->stage == STAGE_INIT){
+
+			method_select_response response;
+			response.ver = SVERSION;
+			response.method = 0;//无需认证
+			char *send_buf = (char *)&response;
+			//直接发送,不会反悔-1
+			send(server->fd, send_buf, sizeof(response), 0);
+			server->stage = STAGE_HANDSHAKE;
+			//off为客户第一次发送的字节数
+			//“协议版本号（1字节）+客户端支持的认证方式个数（1字节）+客户端支持的认证方式列表（1至255字节）”。 
+			int off = (buf->array[1] & 0xff) + 2;
+			if (buf->array[0] == 0x05 && off < (int)(buf->len)) {
+				memmove(buf->array, buf->array + off, buf->len - off);
+				buf->len -= off;
+				continue;
+			}
+
+			buf->len = 0;
+			return ;
+		}else if(server->stage == STAGE_HANDSHAKE || server->stage == STAGE_PARSE){
+			struct socks5_request *request = (struct socks5_request *)buf->array;
+			struct sockaddr_in sock_addr;
+			memset(&sock_addr, 0, sizeof(sock_addr));
+
+			//only supported CMD=CONNECT
+			if(request->cmd != 1){
+				LOGE("unsupported cmd: %d", request->cmd);
+				struct socks5_response response;
+				response.ver  = SVERSION;
+				response.rep  = CMD_NOT_SUPPORTED;
+				response.rsv  = 0;
+				response.atyp = 1;
+				char *send_buf = (char *)&response;
+				send(server->fd, send_buf, 4, 0);
+				close_and_free_remote(remote);
+				close_and_free_server(server);
+				return ;
+			}
+			//CMD = CONNECT
+			if (server->stage == STAGE_HANDSHAKE) {
+				struct socks5_response response;
+				response.ver  = SVERSION;
+				response.rep  = 0;
+				response.rsv  = 0;
+				response.atyp = 1;
+
+				buffer_t resp_to_send;
+				buffer_t *resp_buf = &resp_to_send;
+				balloc(resp_buf, BUF_SIZE);
+
+				memcpy(resp_buf->array, &response, sizeof(struct socks5_response));
+				//sock_addr = 0
+				memcpy(resp_buf->array + sizeof(struct socks5_response),&sock_addr.sin_addr, sizeof(sock_addr.sin_addr));
+				memcpy(resp_buf->array + sizeof(struct socks5_response) +sizeof(sock_addr.sin_addr),&sock_addr.sin_port, sizeof(sock_addr.sin_port));
+
+				int reply_size = sizeof(struct socks5_response) +
+					sizeof(sock_addr.sin_addr) + sizeof(sock_addr.sin_port);
+
+				int s = send(server->fd, resp_buf->array, reply_size, 0);
+				bfree(resp_buf);
+
+				if (s < reply_size) {
+					LOGE("failed to send fake reply");
+					close_and_free_remote(remote);
+					close_and_free_server(server);
+					return;
+				}
+			}
+/*
+		    +----+-----+-------+------+----------+----------+ 
+		    | VER| CMD | RSV   | ATYP |  DST.ADDR|  DST.PORT|
+			+----+-----+-------+------+----------+----------+ 
+			| 1  | 1   | X'00' | 1    | variable |      2   |
+			+----+-----+-------+------+----------+----------+ 
+*/
+			char host[257], ip[INET6_ADDRSTRLEN], port[16];
+
+			buffer_t ss_addr_to_send;
+			buffer_t *abuf = &ss_addr_to_send;
+			balloc(abuf, BUF_SIZE);
+
+			abuf->array[abuf->len++] = request->atyp;
+			int atyp = request->atyp;
+
+			//IPv4
+			if(atyp == 1){
+				//abuf = atyp + DST.ADDR(ipv4) + DST.PORT(2B)
+				size_t in_addr_len = sizeof(struct in_addr);
+				memcpy(abuf->array + abuf->len, buf->array + 4, in_addr_len + 2);
+				abuf->len += in_addr_len + 2;
+			}else if(atyp == 3){
+				//
+				// Domain name
+				//DST.ADDR = len_domain(1B) + Domain
+				uint8_t name_len = *(uint8_t *)(buf->array + 4);//获取域名长度
+				abuf->array[abuf->len++] = name_len;
+				memcpy(abuf->array + abuf->len, buf->array + 4 + 1, name_len + 2);
+				abuf->len += name_len + 2;
+
+				//abuf = atyp + DST.ADDR(ipv4) + DST.PORT(2B)
+			}else if(atyp == 4){
+				//IPv6
+				bfree(abuf);
+				close_and_free_remote(remote);
+				close_and_free_server(server);
+				LOGI("sock5 server not supported IPV6");
+				return;
+			}else{
+				bfree(abuf);
+				LOGE("unsupported addrtype: %d", request->atyp);
+				close_and_free_remote(remote);
+				close_and_free_server(server);
+				return;
+			}
+
+		}
+	}
 
 }
 static void server_send_cb(struct bufferevent *bev, void *user_data)
@@ -91,6 +237,9 @@ static server_t *new_server(int fd,listen_ctx_t *ctx)
 	server->recv_ctx = (server_ctx_t *)ss_malloc(sizeof(server_ctx_t));
 	server->send_ctx = (server_ctx_t *)ss_malloc(sizeof(server_ctx_t));
 	server->buf = (buffer_t *)ss_malloc(sizeof(buffer_t));
+	balloc(server->buf, BUF_SIZE);
+	memset(server->recv_ctx, 0, sizeof(server_ctx_t));
+	memset(server->send_ctx, 0, sizeof(server_ctx_t));
 
 	server->stage = STAGE_INIT;
 	server->recv_ctx->connected = 0;

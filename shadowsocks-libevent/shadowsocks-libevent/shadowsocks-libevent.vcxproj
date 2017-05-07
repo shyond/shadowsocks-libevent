@@ -79,8 +79,10 @@
     <ClInclude Include="..\..\src\common.h" />
     <ClInclude Include="..\..\src\encrypt.h" />
     <ClInclude Include="..\..\src\getopt.h" />
+    <ClInclude Include="..\..\src\http.h" />
     <ClInclude Include="..\..\src\jconf.h" />
     <ClInclude Include="..\..\src\local.h" />
+    <ClInclude Include="..\..\src\sock5.h" />
     <ClInclude Include="..\..\src\tailor.h" />
     <ClInclude Include="..\..\src\utils.h" />
     <ClInclude Include="..\..\src\win32.h" />
@@ -90,6 +92,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\src\encrypt.c" />
     <ClCompile Include="..\..\src\getopt.c" />
+    <ClCompile Include="..\..\src\http.c" />
     <ClCompile Include="..\..\src\local.c" />
     <ClCompile Include="..\..\src\utils.c" />
     <ClCompile Include="..\..\src\win32.c" />
