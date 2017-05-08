@@ -13,7 +13,7 @@ typedef struct listen_ctx{
 	int remote_num;
 	int method;
 	struct sockaddr **remote_addrs;
-
+	int timeout;//连接超时
 }listen_ctx_t;
 
 typedef struct server_ctx{
@@ -47,7 +47,12 @@ typedef struct remote {
 	struct remote_ctx *recv_ctx;
 	struct remote_ctx *send_ctx;
 	struct server *server;
+	struct sockaddr addr;
+	int addr_len;
+	uint32_t counter;
 	event_base *base;
 	bufferevent *bevent;
+	event* ev_timer;//连接超时事件
+	
 } remote_t;
 #endif

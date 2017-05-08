@@ -5,6 +5,9 @@
 #include "common.h"
 #include <assert.h>
 #include "sock5.h"
+#include "http.h"
+#include "tls.h"
+
 
 #include <event2/event.h>
 #include <event2/bufferevent.h>
@@ -59,7 +62,15 @@ static int get_sockaddr(struct sockaddr *skaddr,const char *host, const char *po
 	return 0;
 
 }
-
+static size_t get_sockaddr_len(struct sockaddr *addr)
+{
+	if (addr->sa_family == AF_INET) {
+		return sizeof(struct sockaddr_in);
+	} else if (addr->sa_family == AF_INET6) {
+		return sizeof(struct sockaddr_in6);
+	}
+	return 0;
+}
 static void close_and_free_server(server *server)
 {
 
@@ -68,7 +79,89 @@ static void close_and_free_remote(remote *remote)
 {
 
 }
+static void remote_timeout_cb(evutil_socket_t, short, void * arg)
+{
 
+}
+
+static void remote_recv_cb(struct bufferevent *bev, void *user_data)
+{
+
+}
+static void remote_send_cb(struct bufferevent *bev, void *user_data)
+{
+
+}
+static void remote_event_cb(struct bufferevent *bev, short what,void *user_data)
+{
+
+}
+static void set_remote_cb(remote_t *remote)
+{
+	remote->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
+	bufferevent *bev = bufferevent_socket_new(remote->base, remote->fd,BEV_OPT_THREADSAFE|BEV_OPT_CLOSE_ON_FREE);
+
+	bufferevent_setcb(bev,remote_recv_cb,remote_send_cb,remote_event_cb,remote);
+
+	remote->bevent = bev;
+}
+static remote_t *new_remote(listen_ctx* listener,int fd,int timeout)
+{
+	remote_t *remote;
+	remote = (remote_t *)ss_malloc(sizeof(remote_t));
+
+	memset(remote, 0, sizeof(remote_t));
+
+	remote->buf					= (buffer_t *)ss_malloc(sizeof(buffer_t));
+	remote->recv_ctx            = (remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
+	remote->send_ctx            = (remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
+	balloc(remote->buf, BUF_SIZE);
+	memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
+	memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
+	remote->recv_ctx->connected = 0;
+	remote->send_ctx->connected = 0;
+	remote->fd                  = fd;
+	remote->recv_ctx->remote    = remote;
+	remote->send_ctx->remote    = remote;
+
+	return remote;
+}
+static remote_t *create_remote(listen_ctx *listener,struct sockaddr *addr)
+{
+	struct sockaddr *remote_addr;
+
+	int index = rand() % listener->remote_num;
+	if (addr == NULL) {
+		remote_addr = listener->remote_addrs[index];
+	} else {
+		remote_addr = addr;
+	}
+
+	int remotefd = socket(remote_addr->sa_family, SOCK_STREAM, IPPROTO_TCP);
+
+	if (remotefd == -1) {
+		LOGE("socket new error");
+		return NULL;
+	}
+
+	int opt = 1;
+	setsockopt(remotefd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
+
+	// Setup
+#ifdef WIN32
+	int iMode = 1; 
+	int iasd=ioctlsocket(remotefd,FIONBIO,(u_long FAR*) &iMode);
+#else
+	setnonblocking(remotefd);
+#endif
+
+	remote_t *remote = new_remote(listener,remotefd, listener->timeout);
+	remote->addr_len = get_sockaddr_len(remote_addr);
+	memcpy(&(remote->addr), remote_addr, remote->addr_len);
+	remote->base = listener->base;
+
+	return remote;
+}
 static void server_recv_cb(struct bufferevent *bev, void *user_data)
 {
 	server_t *server = (server_t *)(user_data);
@@ -217,6 +310,94 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 				return;
 			}
 
+			
+			size_t abuf_len  = abuf->len;
+			//对于ipv4和ipv6若发现domain，将其构造成atyp = 3
+			if (atyp == 1 || atyp == 4) {
+				char *hostname;
+				uint16_t p = ntohs(*(uint16_t *)(abuf->array + abuf->len - 2));
+				int ret    = 0;
+				if (p == http_protocol->default_port)
+					ret = http_protocol->parse_packet(buf->array + 3 + abuf->len,buf->len - 3 - abuf->len, &hostname);
+				//Server Name Indication
+				//从tls client_hello的extensions中获取域名
+				else if (p == tls_protocol->default_port)
+					ret = tls_protocol->parse_packet(buf->array + 3 + abuf->len,buf->len - 3 - abuf->len, &hostname);
+				if (ret == -1) {
+					//对于http请求，等待http完整头的到来
+					//对于https请求，等待client_hello的到来
+					server->stage = STAGE_PARSE;
+					bfree(abuf);
+					return;
+				} else if (ret > 0) {
+					
+					// Reconstruct address buffer
+					abuf->len                = 0;
+					abuf->array[abuf->len++] = 3;
+					abuf->array[abuf->len++] = ret;
+					memcpy(abuf->array + abuf->len, hostname, ret);
+					abuf->len += ret;
+					p          = htons(p);
+					memcpy(abuf->array + abuf->len, &p, 2);
+					abuf->len += 2;
+					ss_free(hostname);
+				}
+			}
+
+			server->stage = STAGE_STREAM;
+			buf->len -= (3 + abuf_len);
+			buf->len -= (3 + abuf_len);
+			if (buf->len > 0) {
+				memmove(buf->array, buf->array + 3 + abuf_len, buf->len);
+			}
+
+			{
+				//可在此添加白名单
+			}
+			
+			if(remote == NULL){
+
+				remote = create_remote(server->listener,NULL);
+			}
+			server->remote = remote;
+			remote->server = server;
+			set_remote_cb(remote);
+
+			//一次认证
+			if (!remote->direct) {
+				if (auth) {
+					abuf->array[0] |= ONETIMEAUTH_FLAG;
+					ss_onetimeauth(abuf, server->e_ctx->evp.iv, BUF_SIZE);
+				}
+
+				if (buf->len > 0 && auth) {
+					ss_gen_hash(buf, &remote->counter, server->e_ctx, BUF_SIZE);
+				}
+
+				brealloc(remote->buf, buf->len + abuf->len, BUF_SIZE);
+				memcpy(remote->buf->array, abuf->array, abuf->len);
+				remote->buf->len = buf->len + abuf->len;
+
+				if (buf->len > 0) {
+					memcpy(remote->buf->array + abuf->len, buf->array, buf->len);
+				}
+			} else {
+				if (buf->len > 0) {
+					memcpy(remote->buf->array, buf->array, buf->len);
+					remote->buf->len = buf->len;
+				}
+			}
+		}//server->stage == STAGE_HANDSHAKE || server->stage == STAGE_PARSE
+		else if(server->stage == STAGE_STREAM){
+			if (remote == NULL) {
+				LOGE("invalid remote");
+				close_and_free_server(server);
+				return;
+			}
+			//
+			if (!remote->direct && remote->send_ctx->connected && auth) {
+				ss_gen_hash(remote->buf, &remote->counter, server->e_ctx, BUF_SIZE);
+			}
 		}
 	}
 
@@ -464,7 +645,7 @@ int main(int argc,char** argv)
 		}
 	}
 	lst_ctx.method = m;//加密方式
-
+	lst_ctx.timeout = atoi(timeout);
 
 #ifdef WIN32
 
