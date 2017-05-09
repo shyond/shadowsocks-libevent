@@ -38,6 +38,7 @@ typedef struct server{
 typedef struct remote_ctx {
     int connected;
 	struct remote *remote;
+	event* ev_timer;//连接超时事件
 } remote_ctx_t;
 
 typedef struct remote {
@@ -52,7 +53,6 @@ typedef struct remote {
 	uint32_t counter;
 	event_base *base;
 	bufferevent *bevent;
-	event* ev_timer;//连接超时事件
-	
+	int timeout;
 } remote_t;
 #endif

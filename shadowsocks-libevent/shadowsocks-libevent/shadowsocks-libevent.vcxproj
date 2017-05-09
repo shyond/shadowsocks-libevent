@@ -82,8 +82,10 @@
     <ClInclude Include="..\..\src\http.h" />
     <ClInclude Include="..\..\src\jconf.h" />
     <ClInclude Include="..\..\src\local.h" />
+    <ClInclude Include="..\..\src\protocol.h" />
     <ClInclude Include="..\..\src\sock5.h" />
     <ClInclude Include="..\..\src\tailor.h" />
+    <ClInclude Include="..\..\src\tls.h" />
     <ClInclude Include="..\..\src\utils.h" />
     <ClInclude Include="..\..\src\win32.h" />
     <ClInclude Include="stdafx.h" />
@@ -94,6 +96,7 @@
     <ClCompile Include="..\..\src\getopt.c" />
     <ClCompile Include="..\..\src\http.c" />
     <ClCompile Include="..\..\src\local.c" />
+    <ClCompile Include="..\..\src\tls.c" />
     <ClCompile Include="..\..\src\utils.c" />
     <ClCompile Include="..\..\src\win32.c" />
     <ClCompile Include="shadowsocks-libevent.cpp" />

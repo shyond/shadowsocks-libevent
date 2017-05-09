@@ -81,24 +81,132 @@ static void close_and_free_remote(remote *remote)
 }
 static void remote_timeout_cb(evutil_socket_t, short, void * arg)
 {
+	remote_t *remote = (remote_t *)(arg);
+	server_t *server = remote->server;
+	LOGI("TCP connection timeout");
 
+	close_and_free_remote(remote);
+	close_and_free_server(server);
 }
-
+static void connect_remote(remote_t *remote)
+{
+	bufferevent_socket_connect(remote->bevent, &remote->addr, remote->addr_len);
+}
 static void remote_recv_cb(struct bufferevent *bev, void *user_data)
 {
+	remote_t *remote              = (remote_t *)(user_data);
+	remote_ctx_t *remote_recv_ctx = remote->recv_ctx;
+	server_t *server              = remote->server;
+	buffer_t *buf				  = server->buf;
+	//重新添加远端数据接收超时计时器
+	event_del(remote_recv_ctx->ev_timer);
+	timeval tv = {remote->timeout,0};
+	event_add(remote->recv_ctx->ev_timer,&tv);
 
+#ifdef WIN32
+	bufferevent_disable(remote->bevent,EV_WRITE);
+#endif
+	size_t read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
+
+	size_t left =  buf->capacity -buf->len;//获取剩余容量
+	//重新分配内存，libevent max_io_read_buffer =16k,buf capacity = 16k,
+	//每次加密完buf->len = 0;所以很少出现left < read_len
+	if(left < read_len){
+
+		brealloc(buf,0,read_len + buf->len);
+	}
+
+	int r = bufferevent_read(bev,buf->array + buf->len,read_len);//一次性读完,bufferevent_read有内容不会自动回调
+	assert(r == read_len);
+	buf->len += r;
+
+	if (!remote->direct) {
+
+		int err = ss_decrypt(buf, server->d_ctx, BUF_SIZE);
+		if (err) {
+			LOGE("invalid password or cipher");
+			close_and_free_remote(remote);
+			close_and_free_server(server);
+			return;
+		}
+	}
+
+	int s = send(server->fd, buf->array, buf->len, 0);
+
+	if (s == -1) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// no data, wait for send
+			
+			bufferevent_write(server->bevent,buf->array,buf->len);//投递WSASend
+			buf->len = 0;
+			buf->capacity = 0;
+		} else {
+			LOGE("remote_recv_cb_send");
+			close_and_free_remote(remote);
+			close_and_free_server(server);
+		}
+	} else if (s < (int)(server->buf->len)) {//未完全发送
+		buf->len -= s;
+		buf->idx  = s;
+		bufferevent_write(server->bevent,buf->array + buf->idx,buf->len);//投递WSASend
+		buf->len = 0;
+		buf->capacity = 0;
+	}else{//全部发送，可继续接收
+		bufferevent_enable(server->bevent,EV_READ);
+		buf->len = 0;
+		buf->capacity = 0;
+	}
+
+	// Disable TCP_NODELAY after the first response are sent
+	int opt = 0;
+	setsockopt(server->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&opt, sizeof(opt));
+	setsockopt(remote->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&opt, sizeof(opt));
+	
 }
-static void remote_send_cb(struct bufferevent *bev, void *user_data)
+//server发送完成，remote可继续接收
+static void server_send_cb(struct bufferevent *bev, void *user_data)
 {
+	remote_t *remote = ((server_t *)user_data)->remote;
 
+	//remote recv继续接收
+	bufferevent_enable(remote->bevent,EV_READ);
 }
+
 static void remote_event_cb(struct bufferevent *bev, short what,void *user_data)
 {
+	remote_t *remote = (remote_t *)user_data;
+	server_t *server = remote->server;
 
+	if(what & BEV_EVENT_EOF){
+		LOGI("remote close");
+		close_and_free_remote(remote);
+		close_and_free_server(server);
+		return;
+	}else if(what & BEV_EVENT_ERROR){
+		LOGE("remote event error");
+		close_and_free_remote(remote);
+		close_and_free_server(server);
+		return;
+	}else if(what & BEV_EVENT_CONNECTED){
+		remote->send_ctx->connected =1;//已连接
+		event_del(remote->send_ctx->ev_timer);//去除连接超时定时器
+		timeval tv = {remote->timeout,0};
+		event_add(remote->recv_ctx->ev_timer,&tv);//添加远端数据接收超时计时器
+		bufferevent_enable(remote->bevent,EV_READ);//远端可读取数据
+
+		if(remote->buf->len == 0){
+			bufferevent_enable(server->bevent,EV_READ);//start server recv
+		}else{
+			bufferevent_write(remote->bevent,remote->buf,remote->buf->len);//投递一个WSASend操作
+		}
+	}else{
+		LOGI("other event:%x",what);
+	}
 }
 static void set_remote_cb(remote_t *remote)
 {
-	remote->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
+	remote->send_ctx->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
+	remote->recv_ctx->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
 	bufferevent *bev = bufferevent_socket_new(remote->base, remote->fd,BEV_OPT_THREADSAFE|BEV_OPT_CLOSE_ON_FREE);
 
 	bufferevent_setcb(bev,remote_recv_cb,remote_send_cb,remote_event_cb,remote);
@@ -159,11 +267,14 @@ static remote_t *create_remote(listen_ctx *listener,struct sockaddr *addr)
 	remote->addr_len = get_sockaddr_len(remote_addr);
 	memcpy(&(remote->addr), remote_addr, remote->addr_len);
 	remote->base = listener->base;
-
+	remote->timeout = listener->timeout;
 	return remote;
 }
 static void server_recv_cb(struct bufferevent *bev, void *user_data)
 {
+#ifdef WIN32
+	bufferevent_disable(bev,EV_READ);//不在投递WSARecv
+#endif
 	server_t *server = (server_t *)(user_data);
 	server_ctx_t *server_recv_ctx = server->recv_ctx;
 	remote_t *remote = server->remote;
@@ -192,9 +303,76 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 	buf->len += r;
 
 	while(1){
-		
-		//sock5 .客户端发送
-		if(server->stage == STAGE_INIT){
+		if(server->stage == STAGE_STREAM){
+			if (remote == NULL) {
+				LOGE("invalid remote");
+				close_and_free_server(server);
+				return;
+			}
+			//2字节长度+10字节MAC+data
+			if (!remote->direct && remote->send_ctx->connected && auth) {
+				ss_gen_hash(remote->buf, &remote->counter, server->e_ctx, BUF_SIZE);
+			}
+
+			if(!remote->direct){
+				//加密
+				int err = ss_encrypt(remote->buf, server->e_ctx, BUF_SIZE);
+
+				if (err) {
+					LOGE("invalid password or cipher");
+					close_and_free_remote(remote);
+					close_and_free_server(server);
+					return;
+				}
+
+				//远端没有连接进行连接处理
+				if(!remote->send_ctx->connected){
+
+					remote->buf->idx = 0;
+					// connecting, wait until connected
+					connect_remote(remote);
+					// wait on remote connected event
+					bufferevent_disable(server->bevent,EV_READ);//停止server读
+					timeval tv = {min(MAX_CONNECT_TIMEOUT,remote->timeout),0};
+					event_add(remote->send_ctx->ev_timer,&tv);//添加连接超时定时器
+				}else{//已经连接，发送数据
+
+					//先尝试直接发送
+					int s = send(remote->fd, remote->buf->array, remote->buf->len, 0);
+					if (s == -1) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							// no data, wait for send
+							//投递一个WSASend
+							bufferevent_write(remote->bevent,remote->buf,remote->buf->len);
+							remote->buf->len = 0;
+							remote->buf->idx = 0;
+							return;
+						} else {
+							LOGE("server_recv_cb_send");
+							close_and_free_remote(remote);
+							close_and_free_server(server);
+							return;
+						}
+					} else if (s < (int)(remote->buf->len)) {//未完全发送
+						remote->buf->len -= s;
+						remote->buf->idx  = s;
+						//投递一个WSASend
+						bufferevent_write(remote->bevent,remote->buf + remote->buf->idx,remote->buf->len);
+						remote->buf->len = 0;
+						remote->buf->idx = 0;
+						return;
+					} else {
+						remote->buf->idx = 0;
+						remote->buf->len = 0;
+						//完全发送，可继续接收
+						bufferevent_enable(server->bevent,EV_READ);
+					}
+				}
+			}
+
+			return ;
+		}//sock5 .客户端发送
+		else if(server->stage == STAGE_INIT){
 
 			method_select_response response;
 			response.ver = SVERSION;
@@ -213,6 +391,7 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 			}
 
 			buf->len = 0;
+			bufferevent_enable(server->bevent,EV_READ);//继续接收sock5客户端回复内容
 			return ;
 		}else if(server->stage == STAGE_HANDSHAKE || server->stage == STAGE_PARSE){
 			struct socks5_request *request = (struct socks5_request *)buf->array;
@@ -328,6 +507,7 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 					//对于https请求，等待client_hello的到来
 					server->stage = STAGE_PARSE;
 					bfree(abuf);
+					bufferevent_enable(server->bevent,EV_READ);//继续接收sock5客户端请求数据
 					return;
 				} else if (ret > 0) {
 					
@@ -363,7 +543,7 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 			remote->server = server;
 			set_remote_cb(remote);
 
-			//一次认证
+			//一次认证,remote->buf加密后会在remote_send_cb中连接成功后发送
 			if (!remote->direct) {
 				if (auth) {
 					abuf->array[0] |= ONETIMEAUTH_FLAG;
@@ -388,22 +568,16 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 				}
 			}
 		}//server->stage == STAGE_HANDSHAKE || server->stage == STAGE_PARSE
-		else if(server->stage == STAGE_STREAM){
-			if (remote == NULL) {
-				LOGE("invalid remote");
-				close_and_free_server(server);
-				return;
-			}
-			//
-			if (!remote->direct && remote->send_ctx->connected && auth) {
-				ss_gen_hash(remote->buf, &remote->counter, server->e_ctx, BUF_SIZE);
-			}
-		}
-	}
-
+		
+	}//while(1)
 }
-static void server_send_cb(struct bufferevent *bev, void *user_data)
+//remote发送完成，server可继续接收
+static void remote_send_cb(struct bufferevent *bev, void *user_data)
 {
+	server_t *server = ((remote_t *)user_data)->server;
+
+	//server recv继续接收
+	bufferevent_enable(server->bevent,EV_READ);
 
 }
 static void server_event_cb(struct bufferevent *bev, short what,void *user_data)
