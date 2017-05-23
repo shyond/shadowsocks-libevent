@@ -62,31 +62,31 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="stdafx.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="shadowsocks-libevent.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\src\encrypt.c">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\local.c">
+    <ClCompile Include="stdafx.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\getopt.c">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\src\win32.c">
+    <ClCompile Include="..\..\src\local.cc">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\src\utils.c">
+    <ClCompile Include="..\..\src\encrypt.c">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\http.c">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\tls.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\utils.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\win32.c">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

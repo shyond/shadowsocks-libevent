@@ -1,14 +1,12 @@
 #ifndef  _LOCAL_H
 #define  _LOCAL_H
 
-#include <event2/event.h>
-#include <event2/bufferevent.h>
-#include "local.h"
+#include <WinSock2.h>
 #include "encrypt.h"
 
 
 typedef struct listen_ctx{
-	event_base *base;
+	struct event_base *base;
 	int fd;
 	int remote_num;
 	int method;
@@ -31,14 +29,14 @@ typedef struct server{
 	struct listen_ctx *listener;
 	struct remote *remote;
 	buffer_t *buf;
-	event_base *base;
-	bufferevent *bevent;
+	struct event_base *base;
+	struct bufferevent *bevent;
 }server_t;
 
 typedef struct remote_ctx {
     int connected;
 	struct remote *remote;
-	event* ev_timer;//连接超时事件
+	struct event* ev_timer;//连接超时事件
 } remote_ctx_t;
 
 typedef struct remote {
@@ -51,8 +49,8 @@ typedef struct remote {
 	struct sockaddr addr;
 	int addr_len;
 	uint32_t counter;
-	event_base *base;
-	bufferevent *bevent;
+	struct event_base *base;
+	struct bufferevent *bevent;
 	int timeout;
 } remote_t;
 #endif

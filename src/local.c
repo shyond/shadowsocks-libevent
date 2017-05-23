@@ -1,15 +1,8 @@
-#include "local.h"
-#include "jconf.h"
-#include "utils.h"
-#include "encrypt.h"
-#include "common.h"
+
+
 #include <assert.h>
-#include "sock5.h"
-#include "http.h"
-#include "tls.h"
-
-
 #include <event2/event.h>
+
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include <event2/listener.h>
@@ -20,10 +13,21 @@
 #include "bufferevent-internal.h"
 #include "evthread-internal.h"
 
+#include "local.h"
+#include "jconf.h"
+#include "encrypt.h"
+#include "common.h"
+#include "sock5.h"
+#include "http.h"
+#include "tls.h"
+
+
+
 #ifdef WIN32
 #include "getopt.h"
-#include "win32.h"
-#include <MSTcpIP.h>
+//#include "win32.h"
+//#include <MSTcpIP.h>
+#include <WinSock2.h>
 #else
 #include <getopt.h>
 #endif
@@ -66,20 +70,67 @@ static size_t get_sockaddr_len(struct sockaddr *addr)
 {
 	if (addr->sa_family == AF_INET) {
 		return sizeof(struct sockaddr_in);
-	} else if (addr->sa_family == AF_INET6) {
-		return sizeof(struct sockaddr_in6);
-	}
+	} 
 	return 0;
 }
-static void close_and_free_server(server *server)
+static void free_server(server_t *server)
 {
+	if (server->remote != NULL) {
+		server->remote->server = NULL;
+	}
+	if (server->e_ctx != NULL) {
+		cipher_context_release(&server->e_ctx->evp);
+		ss_free(server->e_ctx);
+	}
+	if (server->d_ctx != NULL) {
+		cipher_context_release(&server->d_ctx->evp);
+		ss_free(server->d_ctx);
+	}
+	if (server->buf != NULL) {
+		bfree(server->buf);
+		ss_free(server->buf);
+	}
+	ss_free(server->recv_ctx);
+	ss_free(server->send_ctx);
+	ss_free(server);
+}
+static void close_and_free_server(server_t *server)
+{
+	if (server != NULL) {
+		bufferevent_disable(server->bevent,EV_READ);
+		bufferevent_disable(server->bevent,EV_WRITE);
+		bufferevent_free(server->bevent);
+		free_server(server);
+	}
+}
+static void free_remote(remote_t *remote)
+{
+	if (remote->server != NULL) {
+		remote->server->remote = NULL;
+	}
+	if (remote->buf != NULL) {
+		bfree(remote->buf);
+		ss_free(remote->buf);
+	}
+	event_free(remote->send_ctx->ev_timer);
+	event_free(remote->recv_ctx->ev_timer);
+	ss_free(remote->recv_ctx);
+	ss_free(remote->send_ctx);
+	ss_free(remote);
+
 
 }
-static void close_and_free_remote(remote *remote)
+static void close_and_free_remote(remote_t *remote)
 {
-
+	if (remote != NULL) {
+		event_del(remote->recv_ctx->ev_timer);
+		bufferevent_disable(remote->bevent,EV_READ);
+		bufferevent_disable(remote->bevent,EV_WRITE);
+		bufferevent_free(remote->bevent);
+		free_remote(remote);
+	}
 }
-static void remote_timeout_cb(evutil_socket_t, short, void * arg)
+static void remote_timeout_cb(evutil_socket_t fd, short what, void *arg)
 {
 	remote_t *remote = (remote_t *)(arg);
 	server_t *server = remote->server;
@@ -94,21 +145,29 @@ static void connect_remote(remote_t *remote)
 }
 static void remote_recv_cb(struct bufferevent *bev, void *user_data)
 {
+	struct timeval tv;
+	size_t read_len;
+	size_t left;
+	int r;
+	int s;
+
+	int opt = 0;
 	remote_t *remote              = (remote_t *)(user_data);
 	remote_ctx_t *remote_recv_ctx = remote->recv_ctx;
 	server_t *server              = remote->server;
 	buffer_t *buf				  = server->buf;
 	//重新添加远端数据接收超时计时器
 	event_del(remote_recv_ctx->ev_timer);
-	timeval tv = {remote->timeout,0};
+	tv.tv_sec = remote->timeout;
+	tv.tv_usec = 0;
 	event_add(remote->recv_ctx->ev_timer,&tv);
 
 #ifdef WIN32
 	bufferevent_disable(remote->bevent,EV_WRITE);
 #endif
-	size_t read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
+	read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
 
-	size_t left =  buf->capacity -buf->len;//获取剩余容量
+	left =  buf->capacity -buf->len;//获取剩余容量
 	//重新分配内存，libevent max_io_read_buffer =16k,buf capacity = 16k,
 	//每次加密完buf->len = 0;所以很少出现left < read_len
 	if(left < read_len){
@@ -116,8 +175,8 @@ static void remote_recv_cb(struct bufferevent *bev, void *user_data)
 		brealloc(buf,0,read_len + buf->len);
 	}
 
-	int r = bufferevent_read(bev,buf->array + buf->len,read_len);//一次性读完,bufferevent_read有内容不会自动回调
-	assert(r == read_len);
+	r = bufferevent_read(bev,buf->array + buf->len,read_len);//一次性读完,bufferevent_read有内容不会自动回调
+//	assert(r == read_len);
 	buf->len += r;
 
 	if (!remote->direct) {
@@ -131,7 +190,7 @@ static void remote_recv_cb(struct bufferevent *bev, void *user_data)
 		}
 	}
 
-	int s = send(server->fd, buf->array, buf->len, 0);
+	s = send(server->fd, buf->array, buf->len, 0);
 
 	if (s == -1) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -158,10 +217,10 @@ static void remote_recv_cb(struct bufferevent *bev, void *user_data)
 	}
 
 	// Disable TCP_NODELAY after the first response are sent
-	int opt = 0;
+	
 	setsockopt(server->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&opt, sizeof(opt));
 	setsockopt(remote->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&opt, sizeof(opt));
-	
+
 }
 //server发送完成，remote可继续接收
 static void server_send_cb(struct bufferevent *bev, void *user_data)
@@ -176,7 +235,7 @@ static void remote_event_cb(struct bufferevent *bev, short what,void *user_data)
 {
 	remote_t *remote = (remote_t *)user_data;
 	server_t *server = remote->server;
-
+	timeval tv ;
 	if(what & BEV_EVENT_EOF){
 		LOGI("remote close");
 		close_and_free_remote(remote);
@@ -190,7 +249,8 @@ static void remote_event_cb(struct bufferevent *bev, short what,void *user_data)
 	}else if(what & BEV_EVENT_CONNECTED){
 		remote->send_ctx->connected =1;//已连接
 		event_del(remote->send_ctx->ev_timer);//去除连接超时定时器
-		timeval tv = {remote->timeout,0};
+		tv.tv_sec = remote->timeout;
+		tv.tv_usec = 0;
 		event_add(remote->recv_ctx->ev_timer,&tv);//添加远端数据接收超时计时器
 		bufferevent_enable(remote->bevent,EV_READ);//远端可读取数据
 
@@ -205,15 +265,14 @@ static void remote_event_cb(struct bufferevent *bev, short what,void *user_data)
 }
 static void set_remote_cb(remote_t *remote)
 {
-	remote->send_ctx->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
-	remote->recv_ctx->ev_timer = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
-	bufferevent *bev = bufferevent_socket_new(remote->base, remote->fd,BEV_OPT_THREADSAFE|BEV_OPT_CLOSE_ON_FREE);
+	struct bufferevent *bev ;
+	bev = bufferevent_socket_new(remote->base, remote->fd,BEV_OPT_THREADSAFE|BEV_OPT_CLOSE_ON_FREE);
 
 	bufferevent_setcb(bev,remote_recv_cb,remote_send_cb,remote_event_cb,remote);
 
 	remote->bevent = bev;
 }
-static remote_t *new_remote(listen_ctx* listener,int fd,int timeout)
+static remote_t *new_remote(struct listen_ctx* listener,int fd,int timeout)
 {
 	remote_t *remote;
 	remote = (remote_t *)ss_malloc(sizeof(remote_t));
@@ -221,8 +280,8 @@ static remote_t *new_remote(listen_ctx* listener,int fd,int timeout)
 	memset(remote, 0, sizeof(remote_t));
 
 	remote->buf					= (buffer_t *)ss_malloc(sizeof(buffer_t));
-	remote->recv_ctx            = (remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
-	remote->send_ctx            = (remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
+	remote->recv_ctx            = (struct remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
+	remote->send_ctx            = (struct remote_ctx *)ss_malloc(sizeof(remote_ctx_t));
 	balloc(remote->buf, BUF_SIZE);
 	memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
 	memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
@@ -231,10 +290,11 @@ static remote_t *new_remote(listen_ctx* listener,int fd,int timeout)
 	remote->fd                  = fd;
 	remote->recv_ctx->remote    = remote;
 	remote->send_ctx->remote    = remote;
-
+	remote->send_ctx->ev_timer  = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
+	remote->recv_ctx->ev_timer  = event_new(remote->base,NULL,EV_TIMEOUT,remote_timeout_cb,remote);
 	return remote;
 }
-static remote_t *create_remote(listen_ctx *listener,struct sockaddr *addr)
+static remote_t *create_remote(struct listen_ctx *listener,struct sockaddr *addr)
 {
 	struct sockaddr *remote_addr;
 
@@ -272,14 +332,17 @@ static remote_t *create_remote(listen_ctx *listener,struct sockaddr *addr)
 }
 static void server_recv_cb(struct bufferevent *bev, void *user_data)
 {
-#ifdef WIN32
-	bufferevent_disable(bev,EV_READ);//不在投递WSARecv
-#endif
+	buffer_t *buf;
+	size_t r;
+	size_t read_len;
+	size_t left;
+
 	server_t *server = (server_t *)(user_data);
 	server_ctx_t *server_recv_ctx = server->recv_ctx;
 	remote_t *remote = server->remote;
-	buffer_t *buf;
-	size_t r;
+#ifdef WIN32
+	bufferevent_disable(bev,EV_READ);//不在投递WSARecv
+#endif
 
 	if (remote == NULL) {
 		buf = server->buf;
@@ -288,9 +351,9 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 	}
 	
 	
-	size_t read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
+	read_len = evbuffer_get_length(bufferevent_get_input(bev));//获取接收字节大小
 	
-	size_t left =  buf->capacity -buf->len;//获取剩余容量
+	left =  buf->capacity -buf->len;//获取剩余容量
 	//重新分配内存，libevent max_io_read_buffer =16k,buf capacity = 16k,
 	//每次加密完buf->len = 0;所以很少出现left < read_len
 	if(left < read_len){
@@ -327,13 +390,14 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 
 				//远端没有连接进行连接处理
 				if(!remote->send_ctx->connected){
-
+					struct timeval tv;
 					remote->buf->idx = 0;
 					// connecting, wait until connected
 					connect_remote(remote);
 					// wait on remote connected event
 					bufferevent_disable(server->bevent,EV_READ);//停止server读
-					timeval tv = {min(MAX_CONNECT_TIMEOUT,remote->timeout),0};
+					tv.tv_sec = min(MAX_CONNECT_TIMEOUT,remote->timeout);
+					tv.tv_usec = 0;
 					event_add(remote->send_ctx->ev_timer,&tv);//添加连接超时定时器
 				}else{//已经连接，发送数据
 
@@ -449,14 +513,17 @@ static void server_recv_cb(struct bufferevent *bev, void *user_data)
 			| 1  | 1   | X'00' | 1    | variable |      2   |
 			+----+-----+-------+------+----------+----------+ 
 */
-			char host[257], ip[INET6_ADDRSTRLEN], port[16];
-
+			char host[257], ip[64], port[16];
+			buffer_t *abuf;
 			buffer_t ss_addr_to_send;
-			buffer_t *abuf = &ss_addr_to_send;
+			
+			abuf = &ss_addr_to_send;
+			int atyp = request->atyp;
+
 			balloc(abuf, BUF_SIZE);
 
 			abuf->array[abuf->len++] = request->atyp;
-			int atyp = request->atyp;
+			
 
 			//IPv4
 			if(atyp == 1){
@@ -582,7 +649,22 @@ static void remote_send_cb(struct bufferevent *bev, void *user_data)
 }
 static void server_event_cb(struct bufferevent *bev, short what,void *user_data)
 {
+	server_t *server = (server_t *)user_data;
+	remote_t *remote = server->remote;
 
+	if(what & BEV_EVENT_EOF){
+		LOGI("server close");
+		close_and_free_remote(remote);
+		close_and_free_server(server);
+		return;
+	}else if(what & BEV_EVENT_ERROR){
+		LOGE("server event error");
+		close_and_free_remote(remote);
+		close_and_free_server(server);
+		return;
+	}else{
+		LOGI("other event:%x",what);
+	}
 }
 static server_t *new_server(int fd,listen_ctx_t *ctx)
 {
@@ -645,10 +727,7 @@ static void listener_cb(evconnlistener *listener, evutil_socket_t fd,struct sock
 #endif
 
 	server_t *server = new_server(fd,ctx);
-	//bufferevent *bev =  bufferevent_socket_new(ctx->base, fd,BEV_OPT_THREADSAFE|BEV_OPT_CLOSE_ON_FREE);
-	//bufferevent_setcb(bev, conn_readcb, conn_writecb, conn_eventcb, ctx->base);
-	//bufferevent_enable(bev, EV_READ | EV_PERSIST);
-	//bufferevent_enable(bev,EV_WRITE);
+	server->listener = listener;
 
 
 }

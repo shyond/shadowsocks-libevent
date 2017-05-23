@@ -3,7 +3,6 @@
 
 #include "protocol.h"
 
-
 extern const protocol_t *const http_protocol;
 
 #endif

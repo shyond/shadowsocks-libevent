@@ -1,5 +1,6 @@
 #include "utils.h"
 
+FILE *logfile;
 
 void usage()
 {

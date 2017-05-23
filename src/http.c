@@ -1,10 +1,9 @@
-#include "http.h"
+
 #include <stdio.h>
 #include <stdlib.h> 
 #include <string.h> 
-#include <ctype.h> 
-
 #include "http.h"
+
 
 #define SERVER_NAME_LEN 256
 #ifdef WIN32

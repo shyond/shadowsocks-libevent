@@ -1,10 +1,14 @@
+
 #include "encrypt.h"
-#include "utils.h"
 
 #if defined(USE_CRYPTO_OPENSSL)
 #include <openssl/md5.h>
 #include <openssl/rand.h>
 #include <openssl/hmac.h>
+#endif
+
+#ifdef WIN32
+#include "win32.h"
 #endif
 
 //#define OFFSET_ROL(p, o) ((uint64_t)(*(p + o)) << (8 * o))
@@ -52,18 +56,20 @@ static const int supported_cipher_key_size[CIPHER_NUM] = {
 int balloc(buffer_t *ptr, size_t capacity)
 {
 	memset(ptr, 0,sizeof(buffer_t));
-	ptr->array    = ss_malloc(capacity);
+	ptr->array    = (char *)ss_malloc(capacity);
 	ptr->capacity = capacity;
 	return capacity;
 }
 
 int brealloc(buffer_t *ptr, size_t len, size_t capacity)
 {
+	size_t real_capacity;
+
 	if (ptr == NULL)
 		return -1;
-	size_t real_capacity = max(len, capacity);
+	real_capacity = (size_t)max(len, capacity);
 	if (ptr->capacity < real_capacity) {
-		ptr->array    = ss_realloc(ptr->array, real_capacity);
+		ptr->array    = (char *)ss_realloc(ptr->array, real_capacity);
 		ptr->capacity = real_capacity;
 	}
 	return real_capacity;
@@ -132,13 +138,13 @@ static int bytes_to_key(const cipher_t *cipher, const digest_type_t *md,
 	const uint8_t *pass, uint8_t *key)
 {
 	size_t datal;
-	datal = strlen((const char *)pass);
 #if defined(USE_CRYPTO_OPENSSL)
 	MD5_CTX c;
 	uint8_t md_buf[MAX_MD_SIZE];
 	int nkey;
 	int addmd;
 	unsigned int i,j,mds;
+	datal = strlen((const char *)pass);
 	mds = 16;//16位md5
 	nkey = cipher_key_size(cipher);//获取秘钥长度
 	if(!pass)
@@ -176,6 +182,7 @@ static int rand_bytes(uint8_t *output, int len)
 
 static const cipher_kt_t *get_cipher_type(int method)
 {
+	const char *ciphername = NULL;
 	if (method <= TABLE || method >= CIPHER_NUM) {
 		LOGE("get_cipher_type(): Illegal method");
 		return NULL;
@@ -189,7 +196,7 @@ static const cipher_kt_t *get_cipher_type(int method)
 		return NULL;
 	}
 
-	const char *ciphername = supported_ciphers[method];
+	ciphername = supported_ciphers[method];
 #if defined(USE_CRYPTO_OPENSSL)
 	return EVP_get_cipherbyname(ciphername);
 #endif
@@ -210,16 +217,19 @@ static const digest_type_t *get_digest_type(const char *digest)
 //初始化cipher
 static void cipher_context_init(cipher_ctx_t *ctx, int method, int enc)
 {
+	const char *ciphername = NULL;
+	const cipher_kt_t *cipher = NULL;
+	cipher_evp_t *evp = NULL;
 	if (method <= TABLE || method >= CIPHER_NUM) {
 		LOGE("cipher_context_init(): Illegal method");
 		return;
 	}
 
-	const char *ciphername = supported_ciphers[method];
-	const cipher_kt_t *cipher = get_cipher_type(method);
+	ciphername = supported_ciphers[method];
+	cipher = get_cipher_type(method);
 #if defined(USE_CRYPTO_OPENSSL)
 	ctx->evp = EVP_CIPHER_CTX_new();
-	cipher_evp_t *evp = ctx->evp;
+	evp  = ctx->evp;
 
 	if (cipher == NULL) {
 		LOGE("Cipher %s not found in OpenSSL library", ciphername);
@@ -246,6 +256,7 @@ static void cipher_context_init(cipher_ctx_t *ctx, int method, int enc)
 void cipher_context_set_iv(cipher_ctx_t *ctx, uint8_t *iv, size_t iv_len,int enc)
 {
 	const unsigned char *true_key;
+	cipher_evp_t *evp;
 
 	if (iv == NULL) {
 		LOGE("cipher_context_set_iv(): IV is null");
@@ -270,7 +281,7 @@ void cipher_context_set_iv(cipher_ctx_t *ctx, uint8_t *iv, size_t iv_len,int enc
 	} else {
 		true_key = enc_key;
 	}
-	cipher_evp_t *evp = ctx->evp;
+	evp = ctx->evp;
 	if (evp == NULL) {
 		LOGE("cipher_context_set_iv(): Cipher context is null");
 		return;
@@ -342,9 +353,10 @@ int ss_onetimeauth_verify(buffer_t *buf, uint8_t *iv)
 {
 	uint8_t hash[ONETIMEAUTH_BYTES * 2];
 	uint8_t auth_key[MAX_IV_LENGTH + MAX_KEY_LENGTH];
+	size_t len;
 	memcpy(auth_key, iv, enc_iv_len);
 	memcpy(auth_key + enc_iv_len, enc_key, enc_key_len);
-	size_t len = buf->len - ONETIMEAUTH_BYTES;
+	len = buf->len - ONETIMEAUTH_BYTES;
 
 #if defined(USE_CRYPTO_OPENSSL)
 	HMAC(EVP_sha1(), auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->array, len, hash, NULL);
@@ -359,13 +371,14 @@ int ss_encrypt(buffer_t *plain, enc_ctx_t *ctx, size_t capacity)
 	// not table
 	if(ctx){
 		static buffer_t tmp = { 0, 0, 0, NULL };
+		buffer_t *cipher;
 		int err       = 1;
 		size_t iv_len = 0;
 		if (!ctx->init) {
 			iv_len = enc_iv_len;
 		}
 		brealloc(&tmp, iv_len + plain->len, capacity);
-		buffer_t *cipher = &tmp;
+		cipher = &tmp;
 		cipher->len = plain->len;
 		if (!ctx->init) {
 			cipher_context_set_iv(&ctx->evp, ctx->evp.iv, iv_len, 1);//初始化cipher
@@ -411,9 +424,10 @@ int ss_decrypt(buffer_t *cipher, enc_ctx_t *ctx, size_t capacity)
 
 		size_t iv_len = 0;
 		int err       = 1;
+		buffer_t *plain;
 
 		brealloc(&tmp, cipher->len, capacity);
-		buffer_t *plain = &tmp;
+		plain = &tmp;
 		plain->len = cipher->len;
 
 		if (!ctx->init) {
@@ -470,6 +484,9 @@ void enc_ctx_init(int method, enc_ctx_t *ctx, int enc)
 
 void enc_key_init(int method, const char *pass)
 {
+	cipher_t cipher;
+	const digest_type_t *md ;
+
 	if (method <= TABLE || method >= CIPHER_NUM) {
 		LOGE("enc_key_init(): Illegal method");
 		return;
@@ -482,7 +499,6 @@ void enc_key_init(int method, const char *pass)
 	OpenSSL_add_all_algorithms();
 #endif
 
-	cipher_t cipher;
 	memset(&cipher, 0, sizeof(cipher_t));
 
 	// Initialize sodium for random generator
@@ -499,7 +515,7 @@ void enc_key_init(int method, const char *pass)
 		
 	}
 
-	const digest_type_t *md = get_digest_type("MD5");
+	md = get_digest_type("MD5");
 	if (md == NULL) {
 		FATAL("MD5 Digest not found in crypto library");
 	}

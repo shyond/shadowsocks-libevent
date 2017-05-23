@@ -3,12 +3,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
+#include "utils.h"
 
-#ifndef USE_CRYPTO_OPENSSL
-#define USE_CRYPTO_OPENSSL
-#endif
+
 
 #ifdef max
 #undef max
@@ -18,13 +16,11 @@
 #undef min
 #endif
 
-#ifdef abs
-#undef abs
-#endif
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
-#define abs(a) ((a < 0) ? (-a) : (a))
+//#define abs(a) ((a < 0) ? (-a) : (a))
+
 
 //use openssl lib
 #if defined(USE_CRYPTO_OPENSSL)
@@ -73,7 +69,6 @@ typedef EVP_MD digest_type_t;
 #define CLEN_BYTES 2U
 #define AUTH_BYTES (ONETIMEAUTH_BYTES + CLEN_BYTES)
 
-
 typedef struct {
 	cipher_evp_t *evp;
 	uint8_t iv[MAX_IV_LENGTH];
@@ -113,7 +108,7 @@ void enc_ctx_init(int method,enc_ctx_t *ctx,int enc);
 int enc_init(const char *pass,const char *method);
 int enc_get_iv_len(void);
 unsigned char *enc_md5(const unsigned char *d, size_t n, unsigned char *md);
-void cipher_context_release(cipher_ctx_t *ctx)
+void cipher_context_release(cipher_ctx_t *ctx);
 
 int ss_onetimeauth(buffer_t *buf,uint8_t *iv,size_t capacity);
 int ss_onetimeauth_verify(buffer_t *buf, uint8_t *iv);
